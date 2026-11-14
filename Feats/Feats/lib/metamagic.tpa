@@ -1,0 +1,882 @@
+// ===========================================================================
+// Feats: metamagic that costs a higher spell slot, without EEex.
+//
+// How it works in play
+//   1. The caster uses a metamagic ability (e.g. Extend Spell). This sets a
+//      spell state and raises their wizard casting level by 60 for a short time.
+//   2. Every wizard spell has an extra "payment" header that is only used at
+//      casting level 61+. Casting any memorized spell now spends that slot and
+//      runs the payment header instead of the spell.
+//   3. The payment header raises the casting level by 120, records which spell
+//      levels the spent slot can pay for, and opens the engine's own list of
+//      the caster's known wizard spells (opcode 214, type 1).
+//   4. Every wizard spell also has a "choice" header used at casting level 121+.
+//      Picking a spell from the list runs it. It checks the level, then asks the
+//      global script to confirm the spell is memorized (HaveSpellRES).
+//   5. If so, the temporary bonuses are cleared and the caster gets a one-use
+//      special ability (FW*) that casts the hidden metamagic copy (FTV*) with
+//      normal targeting. It is removed when used, after a minute, or on rest.
+//
+// The hidden copies (FTV*) are not in any spellbook and cannot be learned.
+//
+// Techniques borrowed from: Tome and Blood "Revised Specialists" (casting-level
+// header switch), Tome and Blood / 5E spellcasting (innate wrapper that casts
+// the real spell), Dimension Gate (hidden spells) and Lichdom (script grants).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Find or create a spell state. Returns its number.
+// ---------------------------------------------------------------------------
+DEFINE_ACTION_FUNCTION FT_ADD_STATE
+  STR_VAR name = ~~
+  RET value
+BEGIN
+  OUTER_SET value = IDS_OF_SYMBOL (~splstate~ ~%name%~)
+  ACTION_IF value < 0 BEGIN
+    OUTER_FOR (i = 250; i > 0 AND value < 0; --i) BEGIN
+      ACTION_IF !(FILE_CONTAINS_EVALUATED (~splstate.ids~ ~^[ %TAB%]*%i%[ %TAB%]~)) BEGIN
+        APPEND ~splstate.ids~ ~%i% %name%~
+        OUTER_SET value = i
+      END
+    END
+    CLEAR_IDS_MAP
+  END
+  ACTION_IF value < 0 BEGIN
+    FAIL ~Feats: no free spell state left for %name%~
+  END
+END
+
+// ---------------------------------------------------------------------------
+// Append an empty ability header that is only used at min_level or above.
+// The header is self-targeted and instant. Returns its 1-based number.
+// ---------------------------------------------------------------------------
+DEFINE_PATCH_FUNCTION FT_ADD_HEADER
+  INT_VAR min_level = 1
+  RET hnum
+BEGIN
+  READ_LONG  0x64 ft_ho
+  READ_SHORT 0x68 ft_hc
+  READ_LONG  0x6a ft_eo
+  READ_SHORT 0x70 ft_total
+  FOR (ft_i = 0; ft_i < ft_hc; ++ft_i) BEGIN
+    SET ft_total += SHORT_AT (ft_ho + ft_i * 0x28 + 0x1e)
+  END
+  SET ft_np = ft_ho + ft_hc * 0x28
+  INSERT_BYTES ft_np 0x28
+  // start from a copy of the first header so the icon and range stay sensible
+  FOR (ft_i = 0; ft_i < 0x28; ++ft_i) BEGIN
+    WRITE_BYTE (ft_np + ft_i) (BYTE_AT (ft_ho + ft_i))
+  END
+  PATCH_IF ft_eo >= ft_np BEGIN
+    WRITE_LONG 0x6a (ft_eo + 0x28)
+  END
+  WRITE_SHORT 0x68 (ft_hc + 1)
+  WRITE_BYTE  (ft_np + 0x0c) 7          // target: caster, no targeting
+  WRITE_SHORT (ft_np + 0x10) min_level
+  WRITE_SHORT (ft_np + 0x12) 0          // casting time
+  WRITE_SHORT (ft_np + 0x1e) 0          // no effects yet
+  WRITE_SHORT (ft_np + 0x20) ft_total   // they will start after all existing ones
+  WRITE_SHORT (ft_np + 0x26) 1          // projectile: none
+  SET hnum = ft_hc + 1
+END
+
+// ---------------------------------------------------------------------------
+// Area projectiles. Given the projectile number from a spell header, decide
+// whether this kind of change applies and (with apply = 1) create the changed
+// copy of the projectile.  kind 1 = lingers twice as long (Extend),
+// 4 = 50% larger (Widen), 5 = affects only enemies (Safe).
+// Returns newpj = 0 if not applicable, otherwise the header value to use.
+// ---------------------------------------------------------------------------
+DEFINE_PATCH_FUNCTION FT_PROJ
+  INT_VAR pj = 0 kind = 0 apply = 0
+  RET newpj
+BEGIN
+  SET newpj = 0
+  SET ft_pv = pj - 1
+  PATCH_IF pj > 1 AND VARIABLE_IS_SET $ft_pro(~%ft_pv%~) BEGIN
+    SPRINT ft_pn $ft_pro(~%ft_pv%~)
+    SET ft_ty = 0
+    SET ft_cnt = 0
+    SET ft_fl = 0
+    SET ft_r1 = 0
+    SET ft_r2 = 0
+    PATCH_IF FILE_EXISTS_IN_GAME ~%ft_pn%.pro~ BEGIN
+      INNER_PATCH_FILE ~%ft_pn%.pro~ BEGIN
+        PATCH_IF BUFFER_LENGTH >= 0x300 BEGIN
+          SET ft_ty  = SHORT_AT 0x08
+          SET ft_fl  = SHORT_AT 0x200
+          SET ft_r1  = SHORT_AT 0x204
+          SET ft_r2  = SHORT_AT 0x206
+          SET ft_cnt = BYTE_AT 0x216
+        END
+      END
+    END
+    SET ft_good = 0
+    SPRINT ft_pre ~FTP~
+    PATCH_IF kind = 1 AND ft_ty = 3 AND ft_cnt >= 2 AND (ft_fl BAND 0x300) = 0 BEGIN
+      SET ft_good = 1
+    END
+    PATCH_IF kind = 4 AND ft_ty = 3 AND ft_r2 > 0 BEGIN
+      SET ft_good = 1
+      SPRINT ft_pre ~FTA~
+    END
+    PATCH_IF kind = 5 AND ft_ty = 3 AND (ft_fl BAND 0xc0) != 0x40 BEGIN
+      SET ft_good = 1
+      SPRINT ft_pre ~FTS~
+    END
+    PATCH_IF ft_good BEGIN
+      SET newpj = pj
+      PATCH_IF apply BEGIN
+        SPRINT ft_newpro ~%ft_pre%%ft_pv%~
+        PATCH_IF !(FILE_EXISTS_IN_GAME ~%ft_newpro%.pro~) BEGIN
+          SET ft_cnt2 = (ft_cnt * 2 > 255) ? 255 : (ft_cnt * 2)
+          SET ft_kind = kind
+          INNER_ACTION BEGIN
+            COPY_EXISTING ~%ft_pn%.pro~ ~weidu_external/Feats/%ft_newpro%.pro~
+              PATCH_IF ft_kind = 1 BEGIN
+                WRITE_BYTE 0x216 ft_cnt2
+              END
+              PATCH_IF ft_kind = 4 BEGIN
+                WRITE_SHORT 0x204 ((ft_r1 * 3) / 2)
+                WRITE_SHORT 0x206 ((ft_r2 * 3) / 2)
+              END
+              PATCH_IF ft_kind = 5 BEGIN
+                WRITE_SHORT 0x200 ((ft_fl BOR 0x40) BAND 0xff7f)
+              END
+            ADD_PROJECTILE ~weidu_external/Feats/%ft_newpro%.pro~
+            CLEAR_IDS_MAP
+          END
+        END
+        SET ft_newval = IDS_OF_SYMBOL (~projectl~ ~%ft_newpro%~)
+        SET newpj = (ft_newval > 0) ? (ft_newval + 1) : 0
+      END
+    END
+  END
+END
+
+// ---------------------------------------------------------------------------
+// Apply (or just test, with apply = 0) one metamagic to the current spell.
+//   mm 1  Extend       double timed durations of 5+ rounds and lingering areas
+//                      (force = 1: shorter durations as well)
+//   mm 2  Empower      +50% damage and healing
+//   mm 3  Maximize     maximum damage and healing
+//   mm 4  Widen        area of effect 50% larger
+//   mm 5  Safe         harmful area spell affects only enemies
+//   mm 6  Quicken      no casting time (done by the one-use ability itself)
+//   mm 7  Persistent   timed durations of 5+ rounds become eight hours
+//   mm 8  Mass         single-target spell affects everyone within 15 feet
+//   mm 9  Irresistible no saving throw, except against disabling/killing effects
+//   mm 10 Intensify    saving throws at -param
+// Returns changed = 1 if the metamagic does anything to this spell.
+// ---------------------------------------------------------------------------
+DEFINE_PATCH_FUNCTION FT_TRANSFORM
+  INT_VAR mm = 0 apply = 0 force = 0 param = 0
+  RET changed
+BEGIN
+  SET changed = 0
+  SET ft_mindur = force ? 1 : 30
+  READ_LONG  0x18 ft_sflags
+  READ_LONG  0x64 ft_ho
+  READ_SHORT 0x68 ft_hc
+  READ_LONG  0x6a ft_eo
+  FOR (ft_h = 0; ft_h < ft_hc; ++ft_h) BEGIN
+    SET ft_hb = ft_ho + ft_h * 0x28
+    READ_SHORT (ft_hb + 0x26) ft_pj
+    SET ft_hmass = 0
+
+    // changes to the area projectile
+    PATCH_IF mm = 1 OR mm = 4 OR (mm = 5 AND (ft_sflags BAND 0x400) != 0) BEGIN
+      LPF FT_PROJ INT_VAR pj = ft_pj kind = mm apply = apply RET newpj END
+      PATCH_IF newpj > 0 BEGIN
+        SET changed = 1
+        PATCH_IF apply BEGIN
+          WRITE_SHORT (ft_hb + 0x26) newpj
+        END
+      END
+    END
+
+    // Quicken: anything with a casting time
+    PATCH_IF mm = 6 AND (SHORT_AT (ft_hb + 0x12)) > 0 BEGIN
+      SET changed = 1
+    END
+
+    // Mass: single-target (or self) header gets a 15-foot area projectile
+    PATCH_IF mm = 8 AND ft_mass > 0 BEGIN
+      SET ft_ptype = 0
+      SET ft_pv2 = ft_pj - 1
+      PATCH_IF ft_pj > 1 AND VARIABLE_IS_SET $ft_pro(~%ft_pv2%~) BEGIN
+        SPRINT ft_pn2 $ft_pro(~%ft_pv2%~)
+        PATCH_IF FILE_EXISTS_IN_GAME ~%ft_pn2%.pro~ BEGIN
+          INNER_PATCH_FILE ~%ft_pn2%.pro~ BEGIN
+            PATCH_IF BUFFER_LENGTH >= 0x0a BEGIN
+              SET ft_ptype = SHORT_AT 0x08
+            END
+          END
+        END
+      END
+      SET ft_htgt = BYTE_AT (ft_hb + 0x0c)
+      PATCH_IF ft_ptype != 3 AND (ft_htgt = 1 OR ft_htgt = 5 OR ft_htgt = 7) BEGIN
+        SET changed = 1
+        SET ft_hmass = 1
+        PATCH_IF apply BEGIN
+          WRITE_SHORT (ft_hb + 0x26) ft_mass
+        END
+      END
+    END
+
+    SET ft_ec = SHORT_AT (ft_hb + 0x1e)
+    SET ft_ei = SHORT_AT (ft_hb + 0x20)
+    FOR (ft_j = 0; ft_j < ft_ec; ++ft_j) BEGIN
+      SET ft_o = ft_eo + (ft_ei + ft_j) * 0x30
+      PATCH_IF ft_o + 0x30 <= BUFFER_LENGTH BEGIN
+        READ_SHORT ft_o          ft_op
+        READ_BYTE  (ft_o + 0x02) ft_tg
+        READ_LONG  (ft_o + 0x04) ft_p1
+        READ_LONG  (ft_o + 0x08) ft_p2
+        READ_BYTE  (ft_o + 0x0c) ft_tm
+        READ_LONG  (ft_o + 0x0e) ft_du
+        READ_LONG  (ft_o + 0x1c) ft_dn
+        READ_LONG  (ft_o + 0x20) ft_ds
+        READ_LONG  (ft_o + 0x24) ft_sv
+        READ_LONG  (ft_o + 0x28) ft_sb
+
+        PATCH_IF mm = 1 AND ft_tm = 0 AND ft_du >= ft_mindur AND ft_du < 0x20000000 BEGIN
+          SET changed = 1
+          PATCH_IF apply BEGIN
+            WRITE_LONG (ft_o + 0x0e) (ft_du * 2)
+          END
+        END
+
+        PATCH_IF mm = 7 AND ft_tm = 0 AND ft_du >= 30 AND ft_du < 28800 BEGIN
+          SET changed = 1
+          PATCH_IF apply BEGIN
+            WRITE_LONG (ft_o + 0x0e) 28800
+          END
+        END
+
+        PATCH_IF mm = 2 OR mm = 3 BEGIN
+          SET ft_okop = 0
+          PATCH_IF ft_op = 12 AND (ft_p2 BAND 0xffff) = 0 BEGIN
+            SET ft_okop = 1
+          END
+          PATCH_IF (ft_op = 17 OR ft_op = 18) AND ft_p2 = 0 BEGIN
+            SET ft_okop = 1
+          END
+          PATCH_IF ft_okop AND ft_p1 >= 0 AND ft_dn >= 0 AND ft_ds >= 0 AND ft_dn < 1000 AND ft_ds < 1000 BEGIN
+            PATCH_IF mm = 2 BEGIN
+              // +50% of the fixed part, plus half the average of the dice
+              SET ft_new = (ft_p1 * 3) / 2 + (ft_dn * (ft_ds + 1)) / 4
+              PATCH_IF ft_new != ft_p1 BEGIN
+                SET changed = 1
+                PATCH_IF apply BEGIN
+                  WRITE_LONG (ft_o + 0x04) ft_new
+                END
+              END
+            END
+            PATCH_IF mm = 3 AND ft_dn > 0 AND ft_ds > 0 BEGIN
+              SET changed = 1
+              PATCH_IF apply BEGIN
+                WRITE_LONG (ft_o + 0x04) (ft_p1 + ft_dn * ft_ds)
+                WRITE_LONG (ft_o + 0x1c) 0
+                WRITE_LONG (ft_o + 0x20) 0
+              END
+            END
+          END
+        END
+
+        // Mass: effects meant for the caster now land on everyone in the area
+        PATCH_IF mm = 8 AND ft_hmass AND apply AND ft_tg = 1 BEGIN
+          WRITE_BYTE (ft_o + 0x02) 2
+        END
+
+        // saving throws
+        PATCH_IF (mm = 9 OR mm = 10) AND (ft_sv BAND 0x1f) != 0 BEGIN
+          PATCH_IF mm = 10 BEGIN
+            SET changed = 1
+            PATCH_IF apply BEGIN
+              WRITE_LONG (ft_o + 0x28) (ft_sb - param)
+            END
+          END
+          PATCH_IF mm = 9 BEGIN
+            // not for effects that kill or disable
+            SET ft_dis = 0
+            PATCH_MATCH ft_op WITH
+              5 13 24 38 39 45 55 74 76 109 128 134 135 157 175 185 209 210 211 213 217 236 238 241 246 BEGIN
+                SET ft_dis = 1
+              END
+              DEFAULT
+            END
+            PATCH_IF !ft_dis BEGIN
+              SET changed = 1
+              PATCH_IF apply BEGIN
+                WRITE_LONG (ft_o + 0x24) (ft_sv BAND 0xffffffe0)
+                WRITE_LONG (ft_o + 0x28) 0
+              END
+            END
+          END
+        END
+      END
+    END
+  END
+END
+
+// ===========================================================================
+// Main installer
+// ===========================================================================
+DEFINE_ACTION_FUNCTION FT_INSTALL_METAMAGIC BEGIN
+
+<<<<<<<< .../ft_inlined/empty.baf
+>>>>>>>>
+
+MKDIR ~weidu_external/Feats~
+COPY ~.../ft_inlined/empty.baf~ ~weidu_external/Feats/ftscript.baf~
+OUTER_SPRINT ft_baf ~weidu_external/Feats/ftscript.baf~
+
+// --- the ten metamagic abilities --------------------------------------------
+// letter used in file names, lowest spell level increase, word for the spell
+// list file, icon
+OUTER_SET ft_tcount = 10
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_tc BEGIN
+  1 => ~1~  2 => ~2~  3 => ~3~  4 => ~4~  5 => ~5~
+  6 => ~6~  7 => ~7~  8 => ~8~  9 => ~9~  10 => ~X~
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_tk BEGIN
+  1 => 1    // Extend
+  2 => 2    // Empower
+  3 => 3    // Maximize
+  4 => 1    // Widen
+  5 => 1    // Safe
+  6 => 2    // Quicken
+  7 => 6    // Persistent
+  8 => 5    // Mass
+  9 => 5    // Irresistible
+  10 => 1   // Intensify (+1 to +4)
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_tkw BEGIN
+  1 => ~extend~      2 => ~empower~   3 => ~maximize~  4 => ~widen~         5 => ~safe~
+  6 => ~quicken~     7 => ~persistent~ 8 => ~mass~     9 => ~irresistible~  10 => ~intensify~
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_icon BEGIN
+  1 => ~SPWI212~  2 => ~SPWI304~  3 => ~SPWI112~  4 => ~SPWI215~  5 => ~SPWI114~
+  6 => ~SPWI305~  7 => ~SPWI408~  8 => ~SPWI401~  9 => ~SPWI205~  10 => ~SPWI118~
+END
+
+// --- the hidden variants each ability can produce ---------------------------
+// entries 1-9 belong to abilities 1-9; entries 10-13 are the four strengths of
+// Intensify (ability 10)
+OUTER_SET ft_ecount = 13
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_ec BEGIN
+  1 => ~1~  2 => ~2~  3 => ~3~  4 => ~4~  5 => ~5~  6 => ~6~  7 => ~7~
+  8 => ~8~  9 => ~9~  10 => ~A~  11 => ~B~  12 => ~C~  13 => ~D~
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_et BEGIN
+  1 => 1  2 => 2  3 => 3  4 => 4  5 => 5  6 => 6  7 => 7
+  8 => 8  9 => 9  10 => 10  11 => 10  12 => 10  13 => 10
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_ek BEGIN      // spell level increase
+  1 => 1  2 => 2  3 => 3  4 => 1  5 => 1  6 => 2  7 => 6
+  8 => 5  9 => 5  10 => 1  11 => 2  12 => 3  13 => 4
+END
+ACTION_DEFINE_ASSOCIATIVE_ARRAY ft_ep BEGIN      // extra value (save penalty)
+  1 => 0  2 => 0  3 => 0  4 => 0  5 => 0  6 => 0  7 => 0
+  8 => 0  9 => 0  10 => 1  11 => 2  12 => 3  13 => 4
+END
+OUTER_FOR (e = 1; e <= ft_ecount; ++e) BEGIN
+  OUTER_SET ft_ref = 400 + e
+  OUTER_SPRINT $ft_suffix(~%e%~) ( AT ft_ref )
+END
+
+OUTER_SET ft_arm_bonus  = 60    // casting level bonus while waiting for payment
+OUTER_SET ft_pick_bonus = 120   // casting level bonus while choosing the spell
+OUTER_SET ft_window     = 30    // seconds each stage stays open
+OUTER_SET ft_ready      = 60    // seconds the one-use ability stays available
+
+// --- spell states -----------------------------------------------------------
+OUTER_FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+  LAF FT_ADD_STATE STR_VAR name = EVAL ~FT_METAMAGIC_%t%~ RET value END
+  OUTER_SET $ft_m(~%t%~) = value
+END
+OUTER_FOR (i = 1; i <= 8; ++i) BEGIN
+  LAF FT_ADD_STATE STR_VAR name = EVAL ~FT_BUDGET_%i%~ RET value END
+  OUTER_SET $ft_b(~%i%~) = value
+END
+LAF FT_ADD_STATE STR_VAR name = ~FT_READY~ RET value END
+OUTER_SET ft_state_ready = value
+
+// splprot.2da rows (vanilla EE): 110 = "has spell state n", 111 = "does not"
+OUTER_SET ft_has = 110
+OUTER_SET ft_hasnot = 111
+
+// --- feedback strings -------------------------------------------------------
+OUTER_FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+  OUTER_SET ft_ref = 300 + t
+  OUTER_SET $ft_armstr(~%t%~) = RESOLVE_STR_REF (( AT ft_ref ))
+END
+OUTER_SET ft_str_paid  = RESOLVE_STR_REF (@50)
+OUTER_SET ft_str_high  = RESOLVE_STR_REF (@51)
+OUTER_SET ft_str_none  = RESOLVE_STR_REF (@52)
+OUTER_SET ft_str_low   = RESOLVE_STR_REF (@53)
+OUTER_SET ft_str_pick  = RESOLVE_STR_REF (@54)
+OUTER_SET ft_str_nomem = RESOLVE_STR_REF (@55)
+
+// --- projectile names (the table mixes decimal and 0x.. numbers) ------------
+COPY_EXISTING - ~projectl.ids~ ~override~
+  REPLACE_EVALUATE ~^[ %TAB%]*\(0[xX][0-9A-Fa-f]+\|[0-9]+\)[ %TAB%]+\([A-Za-z0-9_#!-]+\)~ BEGIN
+    SET ft_pnum = %MATCH1%
+    SPRINT $ft_pro(~%ft_pnum%~) ~%MATCH2%~
+  END ~%MATCH0%~
+
+// --- 15-foot area projectile for Mass Spell ---------------------------------
+OUTER_SET ft_mass = 0
+ACTION_IF FILE_EXISTS_IN_GAME ~inarea.pro~ BEGIN
+  ACTION_IF !(FILE_EXISTS_IN_GAME ~FTMASS.pro~) BEGIN
+    COPY_EXISTING ~inarea.pro~ ~weidu_external/Feats/FTMASS.pro~
+      PATCH_IF BUFFER_LENGTH >= 0x300 BEGIN
+        WRITE_SHORT 0x200 ((SHORT_AT 0x200) BAND 0xff3f)   // friend and foe
+        WRITE_SHORT 0x204 256
+        WRITE_SHORT 0x206 256
+      END
+    ADD_PROJECTILE ~weidu_external/Feats/FTMASS.pro~
+    CLEAR_IDS_MAP
+  END
+  OUTER_SET ft_massval = IDS_OF_SYMBOL (~projectl~ ~FTMASS~)
+  ACTION_IF ft_massval > 0 BEGIN
+    OUTER_SET ft_mass = ft_massval + 1
+  END
+END
+
+// --- the user's spell list --------------------------------------------------
+ACTION_IF FILE_EXISTS ~Feats/metamagic_spells.txt~ BEGIN
+  COPY - ~Feats/metamagic_spells.txt~ ~Feats/metamagic_spells.txt~
+    REPLACE_EVALUATE ~^[ %TAB%]*\([^/= %TAB%%WNL%%LNL%%MNL%][^=%WNL%%LNL%%MNL%]*\)=\([^%WNL%%LNL%%MNL%]*\)~ BEGIN
+      SPRINT ft_un ~%MATCH1%~
+      SPRINT ft_ul ~%MATCH2%~
+      INNER_PATCH_SAVE ft_un ~%ft_un%~ BEGIN
+        REPLACE_TEXTUALLY ~[ %TAB%]+$~ ~~
+      END
+      TO_UPPER ft_un
+      TO_LOWER ft_ul
+      SPRINT $ft_user(~%ft_un%~) ~ %ft_ul% ~
+    END ~%MATCH0%~
+END
+
+// --- shared helper spells ---------------------------------------------------
+// chosen spell is too high level for the slot spent: say so, reopen the list
+COPY ~Feats/data/ftblank.spl~ ~override/FTLOW.spl~
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_high END
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 214 target = 1 timing = 1 parameter2 = 1 END
+
+// metamagic does nothing to the chosen spell: say so, reopen the list
+COPY ~Feats/data/ftblank.spl~ ~override/FTNA.spl~
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_none END
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 214 target = 1 timing = 1 parameter2 = 1 END
+
+// chosen spell is not memorized: say so, reopen the list
+COPY ~Feats/data/ftblank.spl~ ~override/FTNOMEM.spl~
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_nomem END
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 214 target = 1 timing = 1 parameter2 = 1 END
+
+// slot spent was too low level to pay for the metamagic at all
+COPY ~Feats/data/ftblank.spl~ ~override/FTFLO.spl~
+  FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+    SPRINT ft_c $ft_tc(~%t%~)
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 321 target = 1 timing = 1 STR_VAR resource = EVAL ~FTMM%ft_c%~ END
+  END
+  LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_low END
+
+// payment received: FTF<ability><F> for an ability paid with a level F slot
+OUTER_FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+  OUTER_SET ft_k = $ft_tk(~%t%~)
+  OUTER_SPRINT ft_c $ft_tc(~%t%~)
+  OUTER_FOR (f = 2; f <= 9; ++f) BEGIN
+    ACTION_IF f - ft_k >= 1 BEGIN
+      COPY ~Feats/data/ftblank.spl~ ~override/FTF%ft_c%%f%.spl~
+        FOR (m = 1; m <= ft_tcount; ++m) BEGIN
+          SPRINT ft_c2 $ft_tc(~%m%~)
+          LPF ADD_SPELL_EFFECT INT_VAR opcode = 321 target = 1 timing = 1 STR_VAR resource = EVAL ~FTMM%ft_c2%~ END
+        END
+        LPF ADD_SPELL_EFFECT INT_VAR opcode = 328 target = 1 timing = 0 duration = ft_window parameter2 = $ft_m(~%t%~) special = 1 END
+        LPF ADD_SPELL_EFFECT INT_VAR opcode = 191 target = 1 timing = 0 duration = ft_window parameter1 = ft_pick_bonus parameter2 = 0 END
+        FOR (i = 1; i <= f - ft_k; ++i) BEGIN
+          LPF ADD_SPELL_EFFECT INT_VAR opcode = 328 target = 1 timing = 0 duration = ft_window parameter2 = $ft_b(~%i%~) special = 1 END
+        END
+        LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_paid END
+        LPF ADD_SPELL_EFFECT INT_VAR opcode = 214 target = 1 timing = 1 parameter2 = 1 END
+    END
+  END
+END
+
+// the metamagic abilities themselves: FTMM<ability>
+OUTER_FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+  OUTER_SPRINT ft_ic $ft_icon(~%t%~)
+  OUTER_SPRINT ft_c $ft_tc(~%t%~)
+  OUTER_SET ft_nameref = 100 + t
+  OUTER_SET ft_descref = 200 + t
+  COPY ~Feats/data/ftblank.spl~ ~override/FTMM%ft_c%.spl~
+    SAY 0x08 ( AT ft_nameref )
+    SAY 0x50 ( AT ft_descref )
+    WRITE_ASCIIE 0x3a ~%ft_ic%C~ #8
+    WRITE_ASCIIE (0x72 + 0x04) ~%ft_ic%B~ #8
+    // cancel any metamagic already in progress
+    FOR (m = 1; m <= ft_tcount; ++m) BEGIN
+      SPRINT ft_c2 $ft_tc(~%m%~)
+      LPF ADD_SPELL_EFFECT INT_VAR opcode = 321 target = 1 timing = 1 STR_VAR resource = EVAL ~FTMM%ft_c2%~ END
+      SET ft_k2 = $ft_tk(~%m%~)
+      FOR (f = 2; f <= 9; ++f) BEGIN
+        PATCH_IF f - ft_k2 >= 1 BEGIN
+          LPF ADD_SPELL_EFFECT INT_VAR opcode = 321 target = 1 timing = 1 STR_VAR resource = EVAL ~FTF%ft_c2%%f%~ END
+        END
+      END
+    END
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 328 target = 1 timing = 0 duration = ft_window parameter2 = $ft_m(~%t%~) special = 1 END
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 191 target = 1 timing = 0 duration = ft_window parameter1 = ft_arm_bonus parameter2 = 0 END
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = $ft_armstr(~%t%~) END
+    // the ability is always available again
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 172 target = 1 timing = 1 STR_VAR resource = EVAL ~FTMM%ft_c%~ END
+    LPF ADD_SPELL_EFFECT INT_VAR opcode = 171 target = 1 timing = 1 STR_VAR resource = EVAL ~FTMM%ft_c%~ END
+END
+
+// --- script: hand out the abilities, clear leftovers -------------------------
+ACTION_FOR_EACH ft_p IN ~Player1~ ~Player2~ ~Player3~ ~Player4~ ~Player5~ ~Player6~ BEGIN
+  // same method Lichdom uses: the character adds the ability to themselves
+  OUTER_FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+    OUTER_SPRINT ft_c $ft_tc(~%t%~)
+    APPEND_OUTER ~%ft_baf%~ ~IF
+	InParty(%ft_p%)
+	OR(3)
+		Class(%ft_p%,MAGE_ALL)
+		Class(%ft_p%,BARD_ALL)
+		Class(%ft_p%,SORCERER)
+	!TriggerOverride(%ft_p%,HaveSpellRES("FTMM%ft_c%"))
+THEN
+	RESPONSE #100
+		ActionOverride(%ft_p%,AddSpecialAbility("FTMM%ft_c%"))
+		Continue()
+END
+~
+  END
+  // a one-use metamagic ability that was not used in time (or whose casting was
+  // interrupted) is taken away; this also catches it coming back after a rest
+  APPEND_OUTER ~%ft_baf%~ ~IF
+	TriggerOverride(%ft_p%,Global("FT_WRAP","LOCALS",1))
+	!CheckSpellState(%ft_p%,FT_READY)
+THEN
+	RESPONSE #100
+		ActionOverride(%ft_p%,SetGlobal("FT_WRAP","LOCALS",0))
+		ActionOverride(%ft_p%,ApplySpellRES("FTCLR",Myself))
+		Continue()
+END
+~
+END
+
+// --- which spells take part -------------------------------------------------
+// every wizard spell that a scroll can teach, plus the standard SPWI numbering
+COPY_EXISTING_REGEXP GLOB ~^.+\.itm$~ ~override~
+  PATCH_IF BUFFER_LENGTH > 0x72 BEGIN
+    READ_LONG 0x6a ft_eo
+    PATCH_IF ft_eo >= 0x72 AND ft_eo < BUFFER_LENGTH BEGIN
+      FOR (ft_o = ft_eo; ft_o + 0x30 <= BUFFER_LENGTH; ft_o += 0x30) BEGIN
+        PATCH_IF (SHORT_AT ft_o) = 147 BEGIN
+          READ_ASCII (ft_o + 0x14) ft_r (8) NULL
+          TO_UPPER ft_r
+          PATCH_IF ~%ft_r%~ STR_CMP ~~ BEGIN
+            SET $ft_learn(~%ft_r%~) = 1
+          END
+        END
+      END
+    END
+  END
+  BUT_ONLY
+
+COPY_EXISTING_REGEXP GLOB ~^SPWI[1-9][0-4][0-9]\.spl$~ ~override~
+  SPRINT ft_r ~%SOURCE_RES%~
+  TO_UPPER ft_r
+  SET $ft_learn(~%ft_r%~) = 1
+  BUT_ONLY
+
+// --- per-spell work ---------------------------------------------------------
+OUTER_SET ft_idx = 0
+OUTER_SET ft_made = 0
+
+ACTION_PHP_EACH ft_learn AS ft_res => ft_v BEGIN
+  ACTION_IF FILE_EXISTS_IN_GAME ~%ft_res%.spl~ BEGIN
+
+    // look at the spell without changing it
+    OUTER_SET ft_ok = 0
+    COPY_EXISTING - ~%ft_res%.spl~ ~override~
+      PATCH_IF BUFFER_LENGTH > 0x72 BEGIN
+        READ_SHORT 0x1c ft_type
+        READ_LONG  0x34 ft_level
+        READ_SHORT 0x68 ft_hcount
+        READ_LONG  0x08 ft_namestr
+        PATCH_IF ft_type = 1 AND ft_level >= 1 AND ft_level <= 9 AND ft_hcount > 0 AND ft_namestr >= 0 BEGIN
+          SET ft_ok = 1
+          READ_STRREF 0x08 ft_name
+
+          // anything in the user's list for this spell (by file name or by name)?
+          SPRINT ft_ulist ~~
+          SPRINT ft_uname ~%ft_name%~
+          TO_UPPER ft_uname
+          PATCH_IF VARIABLE_IS_SET $ft_user(~%ft_res%~) BEGIN
+            SPRINT ft_ulist $ft_user(~%ft_res%~)
+          END ELSE PATCH_IF VARIABLE_IS_SET $ft_user(~%ft_uname%~) BEGIN
+            SPRINT ft_ulist $ft_user(~%ft_uname%~)
+          END
+
+          FOR (e = 1; e <= ft_ecount; ++e) BEGIN
+            SET ft_t = $ft_et(~%e%~)
+            SET ft_mode = (ft_t = 10) ? 10 : ft_t
+            SPRINT ft_kw $ft_tkw(~%ft_t%~)
+            SET ft_frc = (ft_mode = 1 AND (~%ft_ulist%~ STRING_CONTAINS_REGEXP ~[ ,]extend[ ,]~) = 0) ? 1 : 0
+            SET ft_blk = ((~%ft_ulist%~ STRING_CONTAINS_REGEXP ~[ ,]no-%ft_kw%[ ,]~) = 0) ? 1 : 0
+            LPF FT_TRANSFORM INT_VAR mm = ft_mode apply = 0 force = ft_frc param = $ft_ep(~%e%~) RET changed END
+            PATCH_IF ft_blk BEGIN
+              SET changed = 0
+              PATCH_IF e <= 10 BEGIN
+                PATCH_PRINT ~Feats: %ft_name% (%ft_res%) - %ft_kw% switched off by metamagic_spells.txt~
+              END
+            END ELSE PATCH_IF ft_frc AND changed BEGIN
+              PATCH_PRINT ~Feats: %ft_name% (%ft_res%) - extend forced on by metamagic_spells.txt~
+            END ELSE PATCH_IF ft_frc BEGIN
+              PATCH_PRINT ~Feats: %ft_name% (%ft_res%) - extend was requested in metamagic_spells.txt but there is nothing for it to change~
+            END
+            SET $ft_app(~%e%~) = changed
+            SET $ft_force(~%e%~) = ft_frc
+          END
+        END
+      END
+
+    ACTION_IF ft_ok BEGIN
+      OUTER_SET ft_idx += 1
+      ACTION_IF ft_idx < 10 BEGIN
+        OUTER_SPRINT ft_code ~000%ft_idx%~
+      END ELSE ACTION_IF ft_idx < 100 BEGIN
+        OUTER_SPRINT ft_code ~00%ft_idx%~
+      END ELSE ACTION_IF ft_idx < 1000 BEGIN
+        OUTER_SPRINT ft_code ~0%ft_idx%~
+      END ELSE BEGIN
+        OUTER_SPRINT ft_code ~%ft_idx%~
+      END
+
+      // hidden metamagic copies of this spell
+      OUTER_SET ft_any = 0
+      OUTER_SET ft_anyint = 0
+      OUTER_FOR (e = 1; e <= ft_ecount; ++e) BEGIN
+        OUTER_SET ft_k = $ft_ek(~%e%~)
+        OUTER_SET ft_t = $ft_et(~%e%~)
+        OUTER_SET ft_mode = (ft_t = 10) ? 10 : ft_t
+        ACTION_IF $ft_app(~%e%~) AND (ft_level + ft_k <= 9) BEGIN
+          OUTER_SET ft_any = 1
+          ACTION_IF ft_t = 10 BEGIN
+            OUTER_SET ft_anyint = 1
+          END
+          OUTER_SET ft_made += 1
+          OUTER_SET ft_frc = $ft_force(~%e%~)
+          OUTER_SET ft_par = $ft_ep(~%e%~)
+          OUTER_SET ft_tk1 = $ft_tk(~%ft_t%~)
+          OUTER_SPRINT ft_c  $ft_ec(~%e%~)
+          OUTER_SPRINT ft_tc1 $ft_tc(~%ft_t%~)
+          OUTER_SPRINT ft_vres ~FTV%ft_c%%ft_code%~
+          OUTER_SPRINT ft_kres ~FTK%ft_c%%ft_code%~
+          OUTER_SPRINT ft_wres ~FW%ft_c%%ft_code%~    // 7 characters, so opcode 172 removes it fully
+          OUTER_SPRINT ft_sfx $ft_suffix(~%e%~)
+          OUTER_SET $ft_wl(~%ft_wres%~) = 1
+
+          // the copy itself
+          COPY_EXISTING ~%ft_res%.spl~ ~override/%ft_vres%.spl~
+            LPF FT_TRANSFORM INT_VAR mm = ft_mode apply = 1 force = ft_frc param = ft_par RET changed END
+            SAY_EVALUATED 0x08 ~%ft_name% (%ft_sfx%)~
+
+          // one-use special ability that casts the copy, with the spell's own targeting
+          // (same wrapper pattern as Tome and Blood / 5E spellcasting)
+          COPY_EXISTING ~%ft_res%.spl~ ~override/%ft_wres%.spl~
+            SAY_EVALUATED 0x08 ~%ft_name% (%ft_sfx%)~
+            WRITE_SHORT 0x1c 4                 // innate
+            WRITE_BYTE  0x27 0                 // no secondary type
+            READ_LONG  0x64 ft_ho
+            READ_SHORT 0x68 ft_hc
+            READ_BYTE  (ft_ho + 0x0c) ft_tgt
+            READ_SHORT (ft_ho + 0x0e) ft_rng
+            FOR (ft_h = 0; ft_h < ft_hc; ++ft_h) BEGIN
+              WRITE_BYTE  (ft_ho + ft_h * 0x28 + 0x02) 4   // shown with special abilities
+              WRITE_SHORT (ft_ho + ft_h * 0x28 + 0x26) 1   // no projectile of its own
+              PATCH_IF ft_mode = 6 BEGIN
+                WRITE_SHORT (ft_ho + ft_h * 0x28 + 0x12) 0 // Quicken: no casting time
+              END
+            END
+            LPF DELETE_EFFECT END
+            PATCH_IF ft_tgt = 4 BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 148 target = 1 timing = 1 parameter1 = 0 parameter2 = 1 STR_VAR resource = EVAL ~%ft_vres%~ END
+              PATCH_IF ft_rng > 4 AND ft_rng < 35 BEGIN
+                LPF ALTER_SPELL_HEADER INT_VAR range = (ft_rng - 3) END
+              END
+            END ELSE BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 146 target = 2 timing = 1 parameter1 = 0 parameter2 = 1 STR_VAR resource = EVAL ~%ft_vres%~ END
+            END
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 172 target = 1 timing = 1 STR_VAR resource = EVAL ~%ft_wres%~ END
+
+          // "confirm" spell: clear the temporary bonuses, then hand over that ability
+          COPY ~Feats/data/ftblank.spl~ ~override/%ft_kres%.spl~
+            FOR (f = 2; f <= 9; ++f) BEGIN
+              PATCH_IF f - ft_tk1 >= 1 BEGIN
+                LPF ADD_SPELL_EFFECT INT_VAR opcode = 321 target = 1 timing = 1 STR_VAR resource = EVAL ~FTF%ft_tc1%%f%~ END
+              END
+            END
+            // Intensify: a stronger version replaces the weaker ones
+            PATCH_IF ft_t = 10 BEGIN
+              FOR (e2 = 10; e2 < e; ++e2) BEGIN
+                SPRINT ft_c2 $ft_ec(~%e2%~)
+                LPF ADD_SPELL_EFFECT INT_VAR opcode = 172 target = 1 timing = 1 STR_VAR resource = EVAL ~FW%ft_c2%%ft_code%~ END
+              END
+            END
+            PATCH_IF ft_t != 10 OR e = 10 BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 139 target = 1 timing = 1 parameter1 = ft_str_pick END
+            END
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 172 target = 1 timing = 1 STR_VAR resource = EVAL ~%ft_wres%~ END
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 171 target = 1 timing = 1 STR_VAR resource = EVAL ~%ft_wres%~ END
+            // Quicken: may be cast even if another spell was cast this round
+            PATCH_IF ft_mode = 6 BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 188 target = 1 timing = 0 duration = ft_ready parameter2 = 1 END
+            END
+            // mark the caster so the script clears the ability once the minute is up
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 328 target = 1 timing = 0 duration = ft_ready parameter2 = ft_state_ready special = 1 END
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 309 target = 1 timing = 1 parameter1 = 1 parameter2 = 0 STR_VAR resource = ~FT_WRAP~ END
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 172 target = 1 timing = 4 duration = ft_ready STR_VAR resource = EVAL ~%ft_wres%~ END
+        END ELSE BEGIN
+          OUTER_SET $ft_app(~%e%~) = 0
+        END
+      END
+
+      ACTION_IF ft_any BEGIN
+        // dispatcher: which metamagic is in progress?
+        COPY ~Feats/data/ftblank.spl~ ~override/FTD%ft_code%.spl~
+          FOR (t = 1; t <= 9; ++t) BEGIN
+            SPRINT ft_c $ft_ec(~%t%~)
+            PATCH_IF $ft_app(~%t%~) BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~%t%~) parameter2 = ft_has STR_VAR resource = EVAL ~FTK%ft_c%%ft_code%~ END
+            END ELSE BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~%t%~) parameter2 = ft_has STR_VAR resource = ~FTNA~ END
+            END
+          END
+          PATCH_IF ft_anyint BEGIN
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~10~) parameter2 = ft_has STR_VAR resource = EVAL ~FTI%ft_code%~ END
+          END ELSE BEGIN
+            LPF ADD_SPELL_EFFECT INT_VAR opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~10~) parameter2 = ft_has STR_VAR resource = ~FTNA~ END
+          END
+
+        // Intensify: every strength the spent slot can pay for, weakest first
+        ACTION_IF ft_anyint BEGIN
+          COPY ~Feats/data/ftblank.spl~ ~override/FTI%ft_code%.spl~
+            FOR (e = 10; e <= 13; ++e) BEGIN
+              PATCH_IF $ft_app(~%e%~) BEGIN
+                SPRINT ft_c $ft_ec(~%e%~)
+                SET ft_bud = ft_level + $ft_ek(~%e%~) - 1
+                PATCH_IF ft_bud <= 8 BEGIN
+                  LPF ADD_SPELL_EFFECT INT_VAR opcode = 326 target = 1 timing = 1 parameter1 = $ft_b(~%ft_bud%~) parameter2 = ft_has STR_VAR resource = EVAL ~FTK%ft_c%%ft_code%~ END
+                END
+              END
+            END
+        END
+
+        // question for the script: is this spell memorized?
+        COPY ~Feats/data/ftblank.spl~ ~override/FTQ%ft_code%.spl~
+          LPF ADD_SPELL_EFFECT INT_VAR opcode = 309 target = 1 timing = 1 parameter1 = ft_idx parameter2 = 0 STR_VAR resource = ~FT_PICK~ END
+          LPF ADD_SPELL_EFFECT INT_VAR opcode = 265 target = 1 timing = 1 parameter1 = 1 parameter2 = 0 STR_VAR resource = ~FTPICKG~ END
+
+        ACTION_FOR_EACH ft_p IN ~Player1~ ~Player2~ ~Player3~ ~Player4~ ~Player5~ ~Player6~ BEGIN
+          APPEND_OUTER ~%ft_baf%~ ~IF
+	Global("FTPICKG","GLOBAL",1)
+	TriggerOverride(%ft_p%,Global("FT_PICK","LOCALS",%ft_idx%))
+	TriggerOverride(%ft_p%,HaveSpellRES("%ft_res%"))
+THEN
+	RESPONSE #100
+		SetGlobal("FTPICKG","GLOBAL",0)
+		ActionOverride(%ft_p%,SetGlobal("FT_PICK","LOCALS",0))
+		ActionOverride(%ft_p%,ApplySpellRES("FTD%ft_code%",Myself))
+END
+~
+        END
+      END
+
+      // the two extra headers on the real spell
+      COPY_EXISTING ~%ft_res%.spl~ ~override~
+        // payment header (casting level 61+): spend this slot to pay for a metamagic
+        PATCH_IF ft_level >= 2 BEGIN
+          LPF FT_ADD_HEADER INT_VAR min_level = (1 + ft_arm_bonus) RET hnum END
+          FOR (t = 1; t <= ft_tcount; ++t) BEGIN
+            SET ft_k = $ft_tk(~%t%~)
+            SPRINT ft_c $ft_tc(~%t%~)
+            PATCH_IF ft_level - ft_k >= 1 BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~%t%~) parameter2 = ft_has STR_VAR resource = EVAL ~FTF%ft_c%%ft_level%~ END
+            END ELSE BEGIN
+              LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 326 target = 1 timing = 1 parameter1 = $ft_m(~%t%~) parameter2 = ft_has STR_VAR resource = ~FTFLO~ END
+            END
+          END
+        END
+        // choice header (casting level 121+): this spell was picked from the list
+        LPF FT_ADD_HEADER INT_VAR min_level = (1 + ft_pick_bonus) RET hnum END
+        PATCH_IF ft_any BEGIN
+          PATCH_IF ft_level <= 8 BEGIN
+            LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 326 target = 1 timing = 1 parameter1 = $ft_b(~%ft_level%~) parameter2 = ft_has    STR_VAR resource = EVAL ~FTQ%ft_code%~ END
+            LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 326 target = 1 timing = 1 parameter1 = $ft_b(~%ft_level%~) parameter2 = ft_hasnot STR_VAR resource = ~FTLOW~ END
+          END ELSE BEGIN
+            LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 146 target = 1 timing = 1 parameter2 = 1 STR_VAR resource = ~FTLOW~ END
+          END
+        END ELSE BEGIN
+          LPF ADD_SPELL_EFFECT INT_VAR header = hnum opcode = 146 target = 1 timing = 1 parameter2 = 1 STR_VAR resource = ~FTNA~ END
+        END
+    END
+  END
+END
+
+// removes every one-use metamagic ability (built directly: there can be thousands)
+OUTER_SET ft_wn = 0
+ACTION_PHP_EACH ft_wl AS ft_w => ft_v BEGIN
+  OUTER_SET ft_wn += 1
+END
+COPY ~Feats/data/ftblank.spl~ ~override/FTCLR.spl~
+  READ_LONG 0x6a ft_eo
+  INSERT_BYTES ft_eo (ft_wn * 0x30)
+  WRITE_SHORT (0x72 + 0x1e) ft_wn
+  SET ft_o = ft_eo
+  PHP_EACH ft_wl AS ft_w => ft_v BEGIN
+    WRITE_SHORT  ft_o          172       // remove spell
+    WRITE_BYTE   (ft_o + 0x02) 1         // target: self
+    WRITE_BYTE   (ft_o + 0x0c) 1         // instant, permanent
+    WRITE_BYTE   (ft_o + 0x12) 100       // probability
+    WRITE_ASCIIE (ft_o + 0x14) ~%ft_w%~ #8
+    SET ft_o += 0x30
+  END
+
+OUTER_PATCH ~~ BEGIN
+  PATCH_PRINT ~Feats: %ft_idx% wizard spells prepared, %ft_made% hidden metamagic copies created.~
+END
+
+// --- script: the picked spell was not memorized -----------------------------
+ACTION_FOR_EACH ft_p IN ~Player1~ ~Player2~ ~Player3~ ~Player4~ ~Player5~ ~Player6~ BEGIN
+  APPEND_OUTER ~%ft_baf%~ ~IF
+	Global("FTPICKG","GLOBAL",1)
+	!TriggerOverride(%ft_p%,Global("FT_PICK","LOCALS",0))
+THEN
+	RESPONSE #100
+		SetGlobal("FTPICKG","GLOBAL",0)
+		ActionOverride(%ft_p%,SetGlobal("FT_PICK","LOCALS",0))
+		ActionOverride(%ft_p%,ApplySpellRES("FTNOMEM",Myself))
+END
+~
+END
+APPEND_OUTER ~%ft_baf%~ ~IF
+	Global("FTPICKG","GLOBAL",1)
+THEN
+	RESPONSE #100
+		SetGlobal("FTPICKG","GLOBAL",0)
+END
+~
+
+ACTION_FOR_EACH ft_script IN ~baldur~ ~baldur25~ ~bdbaldur~ BEGIN
+  ACTION_IF FILE_EXISTS_IN_GAME ~%ft_script%.bcs~ BEGIN
+    EXTEND_TOP ~%ft_script%.bcs~ ~%ft_baf%~
+  END
+END
+
+END // FT_INSTALL_METAMAGIC

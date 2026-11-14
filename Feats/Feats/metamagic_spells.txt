@@ -1,0 +1,35 @@
+// Feats - metamagic spell list
+//
+// Use this file to change which metamagic works on which spell.
+// Edit it BEFORE installing (or reinstall the component after editing).
+//
+// One spell per line:
+//
+//     Spell name or file name = metamagic, metamagic, ...
+//
+// The spell can be written as its in-game name (exactly as shown in the
+// spellbook) or as its file name (for example SPWI215).
+//
+// Metamagic words:
+//     extend       make Extend Spell work on this spell even though it normally
+//                  would not. Every timed effect is doubled, including ones
+//                  shorter than 5 rounds, and any lingering area lasts twice as long.
+//     no-extend        Extend Spell never works on this spell.
+//     no-empower       Empower Spell never works on this spell.
+//     no-maximize      Maximize Spell never works on this spell.
+//     no-widen         Widen Spell never works on this spell.
+//     no-safe          Safe Spell never works on this spell.
+//     no-quicken       Quicken Spell never works on this spell.
+//     no-persistent    Persistent Spell never works on this spell.
+//     no-mass          Mass Spell never works on this spell.
+//     no-irresistible  Irresistible Spell never works on this spell.
+//     no-intensify     Intensify Spell never works on this spell.
+//
+// Only "extend" can be forced on. The other metamagics are picked up
+// automatically wherever they have something to change.
+//
+// Lines starting with // are ignored. Examples (remove the // to use them):
+//
+// Hold Person = extend
+// SPWI116 = extend
+// Fireball = no-maximize

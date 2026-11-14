@@ -1,0 +1,131 @@
+@1 = ~Metamagic for arcane casters (costs a higher spell slot, no EEex needed) [prototype]~
+@2 = ~This component needs an Enhanced Edition game.~
+
+// feedback
+@50 = ~Metamagic: spell slot spent. Choose the spell to cast.~
+@51 = ~Metamagic: that spell is too high level for the slot you spent. Choose another.~
+@52 = ~Metamagic: this metamagic has no effect on that spell. Choose another.~
+@53 = ~Metamagic: that spell slot is too low level to pay for this metamagic. The slot is lost.~
+@54 = ~Metamagic ready: use the new special ability to cast the spell (available for one minute).~
+@55 = ~Metamagic: you do not have that spell memorized. Choose another.~
+
+// metamagic names
+@101 = ~Extend Spell~
+@102 = ~Empower Spell~
+@103 = ~Maximize Spell~
+@104 = ~Widen Spell~
+@105 = ~Safe Spell~
+@106 = ~Quicken Spell~
+@107 = ~Persistent Spell~
+@108 = ~Mass Spell~
+@109 = ~Irresistible Spell~
+@110 = ~Intensify Spell~
+
+// ability descriptions
+@201 = ~Extend Spell
+(Metamagic)
+
+Spell Level Increase: +1
+
+Extend Spell doubles the duration of one spell, including how long lingering areas such as Web or Stinking Cloud remain. It cannot extend spell effects with a base duration of less than 5 rounds.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 1 level lower than the one you spent. You gain a one-use special ability that casts it in its extended form; use that ability and target it as you would the normal spell.~
+@202 = ~Empower Spell
+(Metamagic)
+
+Spell Level Increase: +2
+
+Empower Spell increases the damage and healing of one spell by 50%.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 2 levels lower than the one you spent. You gain a one-use special ability that casts it in its empowered form; use that ability and target it as you would the normal spell.~
+@203 = ~Maximize Spell
+(Metamagic)
+
+Spell Level Increase: +3
+
+Maximize Spell causes one spell to deal maximum damage or restore the maximum number of hit points.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 3 levels lower than the one you spent. You gain a one-use special ability that casts it in its maximized form; use that ability and target it as you would the normal spell.~
+@204 = ~Widen Spell
+(Metamagic)
+
+Spell Level Increase: +1
+
+Widen Spell increases the area of effect of one spell by 50%. It does nothing to spells that do not have an area of effect.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 1 level lower than the one you spent. You gain a one-use special ability that casts it in its widened form; use that ability and target it as you would the normal spell.~
+@205 = ~Safe Spell
+(Metamagic)
+
+Spell Level Increase: +1
+
+Safe Spell shapes the area of one harmful spell so that it avoids allies: the spell will only affect enemies. It does nothing to spells that do not have an area of effect.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 1 level lower than the one you spent. You gain a one-use special ability that casts it in its safe form; use that ability and target it as you would the normal spell.~
+@206 = ~Quicken Spell
+(Metamagic)
+
+Spell Level Increase: +2
+
+Quicken Spell lets the character cast one spell instantly. The quickened spell has no casting time and can be cast even if the character has already cast another spell in the same round.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 2 levels lower than the one you spent. You gain a one-use special ability that casts it instantly; use that ability and target it as you would the normal spell.~
+@207 = ~Persistent Spell
+(Metamagic)
+
+Spell Level Increase: +6
+
+Persistent Spell sets the duration of one spell to eight hours. It cannot change spell effects with a base duration of less than 5 rounds.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 6 levels lower than the one you spent. You gain a one-use special ability that casts it in its persistent form; use that ability and target it as you would the normal spell.~
+@208 = ~Mass Spell
+(Metamagic)
+
+Spell Level Increase: +5
+
+Mass Spell lets the character cast one single-target spell in an area of effect. The spell affects all creatures within 15 feet of the target, friend and foe alike. It works with spells that normally only affect the caster, such as Mirror Image, which then affect everyone within 15 feet of the caster. It does nothing to spells that already have an area of effect.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 5 levels lower than the one you spent. You gain a one-use special ability that casts it in its mass form; use that ability and target it as you would the normal spell.~
+@209 = ~Irresistible Spell
+(Metamagic)
+
+Spell Level Increase: +5
+
+Irresistible Spell makes one spell offer no saving throw. It only works on spell effects that weaken or damage the target; it does not work on effects that kill or disable, including stun, paralysis, hold, sleep, charm, confusion, fear, feeblemind, blindness, silence, petrification, polymorph, instant death and disintegration.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 5 levels lower than the one you spent. You gain a one-use special ability that casts it in its irresistible form; use that ability and target it as you would the normal spell.~
+@210 = ~Intensify Spell
+(Metamagic)
+
+Spell Level Increase: +1 to +4
+
+Intensify Spell makes one spell harder to resist. For each level by which the slot you spend exceeds the level of the spell, any saving throw against the spell suffers a -1 penalty, up to -4.
+
+How to use it: activate this ability, then cast any memorized wizard spell to pay for it. That spell is spent and has no effect. A list of the spells you know then appears; choose one that you currently have memorized and that is at least 1 level lower than the one you spent. You gain a one-use special ability that casts it in its intensified form; use that ability and target it as you would the normal spell.~
+
+// feedback when a metamagic ability is activated
+@301 = ~Extend Spell: cast a memorized spell to pay for it (at least 1 level above the spell you want to extend).~
+@302 = ~Empower Spell: cast a memorized spell to pay for it (at least 2 levels above the spell you want to empower).~
+@303 = ~Maximize Spell: cast a memorized spell to pay for it (at least 3 levels above the spell you want to maximize).~
+@304 = ~Widen Spell: cast a memorized spell to pay for it (at least 1 level above the spell you want to widen).~
+@305 = ~Safe Spell: cast a memorized spell to pay for it (at least 1 level above the spell you want to make safe).~
+@306 = ~Quicken Spell: cast a memorized spell to pay for it (at least 2 levels above the spell you want to quicken).~
+@307 = ~Persistent Spell: cast a memorized spell to pay for it (at least 6 levels above the spell you want to make persistent).~
+@308 = ~Mass Spell: cast a memorized spell to pay for it (at least 5 levels above the spell you want to cast as a mass spell).~
+@309 = ~Irresistible Spell: cast a memorized spell to pay for it (at least 5 levels above the spell you want to make irresistible).~
+@310 = ~Intensify Spell: cast a memorized spell to pay for it. Each level it is above the spell you want to intensify gives -1 to saves, up to -4.~
+
+// suffixes for the hidden spell variants (entries 1-13)
+@401 = ~Extended~
+@402 = ~Empowered~
+@403 = ~Maximized~
+@404 = ~Widened~
+@405 = ~Safe~
+@406 = ~Quickened~
+@407 = ~Persistent~
+@408 = ~Mass~
+@409 = ~Irresistible~
+@410 = ~Intensified -1~
+@411 = ~Intensified -2~
+@412 = ~Intensified -3~
+@413 = ~Intensified -4~
